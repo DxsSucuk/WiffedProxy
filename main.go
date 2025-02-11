@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
+	proxyproto "github.com/pires/go-proxyproto"
 	"io"
 	"net"
 	"os"
@@ -106,8 +106,17 @@ func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, ta
 	// Add Proxy Protocol header if the flag is not set
 	var packet []byte
 	if !skipProxyHeader {
-		proxyHeader := createProxyProtocolV2Header(clientAddr.IP, clientAddr.Port, targetAddr.IP, targetAddr.Port, true)
-		packet = append(proxyHeader, data...)
+		//proxyHeader := createProxyProtocolV2Header(clientAddr.IP, clientAddr.Port, targetAddr.IP, targetAddr.Port, true)
+		proxyHeader := proxyproto.HeaderProxyFromAddrs(2, clientAddr, targetAddr)
+		var proxyHeaderContent []byte
+		proxyHeaderContent, err := proxyHeader.Format()
+
+		if err != nil {
+			fmt.Println("Proxy Protocol V2 UDP Format error:", err)
+			return
+		}
+
+		packet = append(proxyHeaderContent, data...)
 	} else {
 		packet = data
 	}
@@ -173,8 +182,9 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 
 	// Add Proxy Protocol header if the flag is not set
 	if !skipProxyHeader {
-		proxyHeader := createProxyProtocolV2Header(sourceAddr.IP, sourceAddr.Port, targetAddr.IP, targetAddr.Port, false)
-		_, err = srvConn.Write(proxyHeader)
+		//proxyHeader := createProxyProtocolV2Header(sourceAddr.IP, sourceAddr.Port, targetAddr.IP, targetAddr.Port, false)
+		proxyHeader := proxyproto.HeaderProxyFromAddrs(2, sourceAddr, targetAddr)
+		_, err = proxyHeader.WriteTo(srvConn)
 		if err != nil {
 			fmt.Println("Error writing proxy header:", err)
 		}
@@ -192,37 +202,4 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 			fmt.Println("Error forwarding TCP response to server:", err)
 		}
 	}()
-}
-
-func createProxyProtocolV2Header(srcIP net.IP, srcPort int, dstIP net.IP, dstPort int, isUDP bool) []byte {
-	header := make([]byte, 16+4+len(srcIP)+len(dstIP))
-	header[0] = 0x0D // Proxy Protocol v2 signature
-	header[1] = 0x0A
-	header[2] = 0x0D
-	header[3] = 0x0A
-	header[4] = 0x00
-	header[5] = 0x0D
-	header[6] = 0x0A
-	header[7] = 0x51
-	header[8] = 0x55
-	header[9] = 0x49
-	header[10] = 0x54
-	header[11] = 0x0A
-
-	// Command and address family
-	header[12] = 0x21 // PROXY command, INET family
-	if isUDP {
-		header[13] = 0x12 // Datagram (UDP)
-	} else {
-		header[13] = 0x11 // Stream (TCP)
-	}
-
-	binary.BigEndian.PutUint16(header[14:], uint16(12+len(srcIP)+len(dstIP)))
-
-	copy(header[16:], srcIP.To4())
-	copy(header[20:], dstIP.To4())
-	binary.BigEndian.PutUint16(header[24:], uint16(srcPort))
-	binary.BigEndian.PutUint16(header[26:], uint16(dstPort))
-
-	return header
 }
