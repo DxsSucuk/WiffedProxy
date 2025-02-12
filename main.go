@@ -215,7 +215,8 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 			// Find the end of the HTTP request headers
 			headersEnd := bytes.Index(buffer[:n], []byte("\r\n\r\n"))
 			if headersEnd != -1 {
-				modifiedBuffer := append(buffer[:headersEnd], append([]byte("\r\n"+headers), buffer[headersEnd:]...)...)
+				modifiedBuffer := append(buffer[:headersEnd], []byte("\r\n"+headers)...)
+				modifiedBuffer = append(modifiedBuffer, []byte("\r\n")...)
 				_, err := srvConn.Write(modifiedBuffer)
 				if err != nil {
 					fmt.Println("Error sending modified Header to server:", err)
