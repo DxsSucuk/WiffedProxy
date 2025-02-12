@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	proxyproto "github.com/pires/go-proxyproto"
@@ -106,7 +107,6 @@ func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, ta
 	// Add Proxy Protocol header if the flag is not set
 	var packet []byte
 	if !skipProxyHeader {
-		//proxyHeader := createProxyProtocolV2Header(clientAddr.IP, clientAddr.Port, targetAddr.IP, targetAddr.Port, true)
 		proxyHeader := proxyproto.HeaderProxyFromAddrs(2, clientAddr, targetAddr)
 		var proxyHeaderContent []byte
 		proxyHeaderContent, err := proxyHeader.Format()
@@ -172,6 +172,7 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 		fmt.Println("Error connecting to TCP server:", err)
 		err := clientConn.Close()
 		if err != nil {
+			fmt.Println("Failed to close client TCP connection:", err)
 			return
 		}
 		return
@@ -180,26 +181,86 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 	sourceAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 	targetAddr := srvConn.RemoteAddr().(*net.TCPAddr)
 
-	// Add Proxy Protocol header if the flag is not set
-	if !skipProxyHeader {
-		//proxyHeader := createProxyProtocolV2Header(sourceAddr.IP, sourceAddr.Port, targetAddr.IP, targetAddr.Port, false)
-		proxyHeader := proxyproto.HeaderProxyFromAddrs(2, sourceAddr, targetAddr)
-		_, err = proxyHeader.WriteTo(srvConn)
+	// Read the first few bytes to determine if it's HTTP
+	buffer := make([]byte, 1024)
+	n, err := clientConn.Read(buffer)
+	if err != nil && err != io.EOF {
+		fmt.Println("Error reading from client:", err)
+		err := clientConn.Close()
 		if err != nil {
-			fmt.Println("Error writing proxy header:", err)
+			// Maybe dont return? Otherwise server connection will stay online?
+			return
+		}
+
+		err = srvConn.Close()
+		if err != nil {
+			return
+		}
+		return
+	}
+
+	// Check if the data looks like an HTTP request
+	isHTTP := false
+	if n > 0 && (bytes.HasPrefix(buffer, []byte("GET")) || bytes.HasPrefix(buffer, []byte("POST"))) {
+		isHTTP = true
+	}
+
+	// Handle Proxy Protocol or X-Real-IP header
+	if !skipProxyHeader {
+		if isHTTP {
+			// Inject X-Real-IP header into the HTTP request
+			clientIP := sourceAddr.IP.String()
+			headers := fmt.Sprintf("X-Real-IP: %s\r\n", clientIP)
+
+			// Find the end of the HTTP request headers
+			headersEnd := bytes.Index(buffer[:n], []byte("\r\n\r\n"))
+			if headersEnd != -1 {
+				modifiedBuffer := append(buffer[:headersEnd], append([]byte("\r\n"+headers), buffer[headersEnd:]...)...)
+				_, err := srvConn.Write(modifiedBuffer)
+				if err != nil {
+					fmt.Println("Error sending modified Header to server:", err)
+					return
+				}
+			} else {
+				_, err := srvConn.Write(buffer[:n])
+				if err != nil {
+					fmt.Println("Error sending unmodified content to server:", err)
+					return
+				}
+			}
+		} else {
+			// Create and send the Proxy Protocol header
+			proxyHeader := proxyproto.HeaderProxyFromAddrs(2, sourceAddr, targetAddr)
+			_, err = proxyHeader.WriteTo(srvConn)
+			if err != nil {
+				fmt.Println("Error writing proxy header:", err)
+			}
+			_, err = srvConn.Write(buffer[:n])
+			if err != nil {
+				fmt.Println("Error forwarding TCP packet to server:", err)
+				return
+			}
+		}
+	} else {
+		// Directly forward the buffer content
+		_, err := srvConn.Write(buffer[:n])
+		if err != nil {
+			fmt.Println("Error forwarding TCP packet to server:", err)
+			return
 		}
 	}
 
+	// Forward the rest of the traffic
 	go func() {
 		_, err := io.Copy(srvConn, clientConn)
 		if err != nil {
-			fmt.Println("Error forwarding TCP response to client:", err)
+			fmt.Println("Error forwarding TCP request to server:", err)
 		}
 	}()
 	go func() {
 		_, err := io.Copy(clientConn, srvConn)
 		if err != nil {
-			fmt.Println("Error forwarding TCP response to server:", err)
+			fmt.Println("Error forwarding TCP response to client:", err)
 		}
 	}()
 }
