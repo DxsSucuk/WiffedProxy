@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	proxyproto "github.com/pires/go-proxyproto"
@@ -15,14 +16,22 @@ var udpTargetMap = make(map[string]string)
 var tcpTargetMap = make(map[string]string)
 var tcpRoutingMap = make(map[string]string)
 var skipProxyHeader bool
+var dontTLS bool
+var dontMinecraftHandshake bool
+var dontHTTPHost bool
+var tcpRoutingHost int64
 
 func main() {
+
 	// Command-line flags for adding entries and skipping Proxy Protocol v2 header
 	udpEntries := flag.String("udp", "", "Comma-separated list of UDP local:target address pairs (e.g., ':9000=127.0.0.1:8080,:9001=127.0.0.1:8081')")
 	tcpEntries := flag.String("tcp", "", "Comma-separated list of TCP local:target address pairs (e.g., ':9002=127.0.0.1:8082,:9003=127.0.0.1:8083')")
-	tcpRoutingHost := flag.Int("tcpRouteHost", 25565, "TCP port to use for routing requests")
 	tcpRoutingEntries := flag.String("tcpRouteTarget", "", "Comma-separated list of TCP hostname:target address pairs (e.g., 'fivem.presti.me=127.0.0.1:8082,:mc.presti.me=127.0.0.1:8083')")
+	flag.Int64Var(&tcpRoutingHost, "tcpRouteHost", 0, "TCP port to use for routing requests")
 	flag.BoolVar(&skipProxyHeader, "no-proxy-header", false, "Skip Proxy Protocol v2 header in packet forwarding")
+	flag.BoolVar(&dontTLS, "dont-tls", false, "Don't try to pass SNI from TLS request")
+	flag.BoolVar(&dontMinecraftHandshake, "dont-mc", false, "Don't try to pass Hostname from Minecraft Handshake")
+	flag.BoolVar(&dontHTTPHost, "dont-http", false, "Don't try to pass Hostname from HTTP request")
 	flag.Parse()
 
 	// Parse the UDP and TCP entries
@@ -43,6 +52,22 @@ func main() {
 		os.Exit(1) // Exit with an error code
 	}
 
+	if skipProxyHeader {
+		fmt.Println("Skipping proxy header")
+	}
+
+	if dontTLS {
+		fmt.Println("Skipping TLS SNI extraction")
+	}
+
+	if dontMinecraftHandshake {
+		fmt.Println("Skipping Minecraft Handshake hostname extraction")
+	}
+
+	if dontHTTPHost {
+		fmt.Println("Skipping HTTP Hostname extraction")
+	}
+
 	// Start proxies
 	for localAddr := range udpTargetMap {
 		go startUDPProxy(localAddr)
@@ -51,7 +76,7 @@ func main() {
 		go startTCPProxy(localAddr, false)
 	}
 
-	if tcpRoutingHost != nil {
+	if tcpRoutingHost > 0 {
 		go startTCPProxy(fmt.Sprintf(":%d", tcpRoutingHost), true)
 	}
 
@@ -164,7 +189,11 @@ func startTCPProxy(localAddr string, isRouting bool) {
 		}
 	}(listener)
 
-	fmt.Println("TCP Proxy started on", localAddr, "forwarding to", tcpTargetMap[localAddr])
+	if isRouting {
+		fmt.Println("TCP Proxy started on", localAddr, "set to routing")
+	} else {
+		fmt.Println("TCP Proxy started on", localAddr, "forwarding to", tcpTargetMap[localAddr])
+	}
 
 	for {
 		clientConn, err := listener.Accept()
@@ -200,11 +229,12 @@ func handleTCPConnection(clientConn net.Conn, target string, isRouting bool) {
 	var hostname string
 	isHTTP := false
 	isMinecraftHandshake := false
+	isTLS := false
 	if n > 0 {
 		// Minecraft handshake packet starts with VarInt protocol version
 		// followed by VarInt server address length, then the server address string
 		// Also before actually parsing the handshake packet, check if routing is even active.
-		if isRouting && buffer[0] <= 0x7F { // Simple VarInt check
+		if isRouting && !dontMinecraftHandshake && buffer[0] <= 0x7F { // Simple VarInt check
 			// Attempt to parse Minecraft handshake
 			protocolVersion, bytesRead := readVarInt(buffer)
 			if bytesRead > 0 && bytesRead <= n {
@@ -219,15 +249,43 @@ func handleTCPConnection(clientConn net.Conn, target string, isRouting bool) {
 					}
 				}
 			}
-		} else {
-			if bytes.HasPrefix(buffer, []byte("GET")) || bytes.HasPrefix(buffer, []byte("POST")) {
-				isHTTP = true
+		} else if bytes.HasPrefix(buffer, []byte("GET")) || bytes.HasPrefix(buffer, []byte("POST")) {
+			isHTTP = true
+
+			if !dontHTTPHost {
+				// Extract hostname from HTTP headers
+				headers := string(buffer[:n])
+				lines := strings.Split(headers, "\r\n")
+				for _, line := range lines {
+					if strings.HasPrefix(line, "Host:") {
+						hostname = strings.TrimSpace(strings.TrimPrefix(line, "Host:"))
+						break
+					}
+				}
 			}
+		} else if isRouting && !dontTLS && buffer[0] == 0x16 && buffer[1] == 0x03 && buffer[2] <= 0x03 {
+			// Possible TLS handshake (SNI extraction)
+			isTLS = true
+			hostname = extractSNI(buffer[:n])
 		}
 	}
 
+	if isHTTP {
+		fmt.Println("HTTP connection from", sourceAddr.String())
+	}
+
 	if isMinecraftHandshake {
-		target = tcpRoutingMap[hostname]
+		fmt.Println("Minecraft handshake from", sourceAddr.String())
+	}
+
+	if isTLS {
+		fmt.Println("TLS connection from", sourceAddr.String())
+	}
+
+	if isRouting && len(hostname) != 0 {
+		if newTarget, ok := tcpRoutingMap[hostname]; ok {
+			target = newTarget
+		}
 	}
 
 	srvConn, err := net.Dial("tcp", target)
@@ -312,4 +370,38 @@ func readVarInt(data []byte) (int, int) {
 		}
 	}
 	return value, bytesRead
+}
+
+func extractSNI(data []byte) string {
+	if len(data) < 43 {
+		return ""
+	}
+
+	sessionIDLength := int(data[43])
+	if len(data) < 44+sessionIDLength+2 {
+		return ""
+	}
+	offset := 44 + sessionIDLength
+	extensionLength := int(binary.BigEndian.Uint16(data[offset:]))
+	offset += 2
+	endOffset := offset + extensionLength
+	if len(data) < endOffset {
+		return ""
+	}
+
+	for offset < endOffset {
+		typeField := binary.BigEndian.Uint16(data[offset:])
+		offset += 2
+		lengthField := int(binary.BigEndian.Uint16(data[offset:]))
+		offset += 2
+
+		if typeField == 0x0000 && len(data) >= offset+lengthField {
+			sniLength := int(data[offset])
+			if len(data) >= offset+1+sniLength {
+				return string(data[offset+1 : offset+1+sniLength])
+			}
+		}
+		offset += lengthField
+	}
+	return ""
 }
