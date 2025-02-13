@@ -13,12 +13,15 @@ import (
 
 var udpTargetMap = make(map[string]string)
 var tcpTargetMap = make(map[string]string)
+var tcpRoutingMap = make(map[string]string)
 var skipProxyHeader bool
 
 func main() {
 	// Command-line flags for adding entries and skipping Proxy Protocol v2 header
 	udpEntries := flag.String("udp", "", "Comma-separated list of UDP local:target address pairs (e.g., ':9000=127.0.0.1:8080,:9001=127.0.0.1:8081')")
 	tcpEntries := flag.String("tcp", "", "Comma-separated list of TCP local:target address pairs (e.g., ':9002=127.0.0.1:8082,:9003=127.0.0.1:8083')")
+	tcpRoutingHost := flag.Int("tcpRouteHost", 25565, "TCP port to use for routing requests")
+	tcpRoutingEntries := flag.String("tcpRouteTarget", "", "Comma-separated list of TCP hostname:target address pairs (e.g., 'fivem.presti.me=127.0.0.1:8082,:mc.presti.me=127.0.0.1:8083')")
 	flag.BoolVar(&skipProxyHeader, "no-proxy-header", false, "Skip Proxy Protocol v2 header in packet forwarding")
 	flag.Parse()
 
@@ -30,8 +33,12 @@ func main() {
 		tcpTargetMap = parseEntries(*tcpEntries)
 	}
 
+	if *tcpRoutingEntries != "" {
+		tcpRoutingMap = parseEntries(*tcpRoutingEntries)
+	}
+
 	// Check if no entries were provided and print a message
-	if len(udpTargetMap) == 0 && len(tcpTargetMap) == 0 {
+	if len(udpTargetMap) == 0 && len(tcpTargetMap) == 0 && len(tcpRoutingMap) == 0 {
 		fmt.Println("No entries provided for proxying. Please provide UDP and/or TCP address mappings.")
 		os.Exit(1) // Exit with an error code
 	}
@@ -41,7 +48,11 @@ func main() {
 		go startUDPProxy(localAddr)
 	}
 	for localAddr := range tcpTargetMap {
-		go startTCPProxy(localAddr)
+		go startTCPProxy(localAddr, false)
+	}
+
+	if tcpRoutingHost != nil {
+		go startTCPProxy(fmt.Sprintf(":%d", tcpRoutingHost), true)
 	}
 
 	select {} // Keep main alive
@@ -140,7 +151,7 @@ func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, ta
 	}
 }
 
-func startTCPProxy(localAddr string) {
+func startTCPProxy(localAddr string, isRouting bool) {
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
 		fmt.Println("Error starting TCP proxy:", err)
@@ -162,11 +173,63 @@ func startTCPProxy(localAddr string) {
 			continue
 		}
 
-		go handleTCPConnection(clientConn, tcpTargetMap[localAddr])
+		if isRouting {
+			go handleTCPConnection(clientConn, "", true)
+		} else {
+			go handleTCPConnection(clientConn, tcpTargetMap[localAddr], false)
+		}
 	}
 }
 
-func handleTCPConnection(clientConn net.Conn, target string) {
+func handleTCPConnection(clientConn net.Conn, target string, isRouting bool) {
+	sourceAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+
+	// Read the first few bytes to determine if it's HTTP or Minecraft
+	buffer := make([]byte, 1024)
+	n, err := clientConn.Read(buffer)
+	if err != nil && err != io.EOF {
+		fmt.Println("Error reading from client:", err)
+		err := clientConn.Close()
+		if err != nil {
+			return
+		}
+
+		return
+	}
+
+	var hostname string
+	isHTTP := false
+	isMinecraftHandshake := false
+	if n > 0 {
+		// Minecraft handshake packet starts with VarInt protocol version
+		// followed by VarInt server address length, then the server address string
+		// Also before actually parsing the handshake packet, check if routing is even active.
+		if isRouting && buffer[0] <= 0x7F { // Simple VarInt check
+			// Attempt to parse Minecraft handshake
+			protocolVersion, bytesRead := readVarInt(buffer)
+			if bytesRead > 0 && bytesRead <= n {
+				serverAddressLength, bytesRead2 := readVarInt(buffer[bytesRead:])
+				if bytesRead2 > 0 && bytesRead+bytesRead2 <= n {
+					serverAddressStart := bytesRead + bytesRead2
+					serverAddressEnd := serverAddressStart + int(serverAddressLength)
+					if serverAddressEnd <= n {
+						hostname = string(buffer[serverAddressStart:serverAddressEnd])
+						isMinecraftHandshake = true
+						fmt.Println("Detected protocol version:", protocolVersion)
+					}
+				}
+			}
+		} else {
+			if bytes.HasPrefix(buffer, []byte("GET")) || bytes.HasPrefix(buffer, []byte("POST")) {
+				isHTTP = true
+			}
+		}
+	}
+
+	if isMinecraftHandshake {
+		target = tcpRoutingMap[hostname]
+	}
+
 	srvConn, err := net.Dial("tcp", target)
 	if err != nil {
 		fmt.Println("Error connecting to TCP server:", err)
@@ -178,32 +241,9 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 		return
 	}
 
-	sourceAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 	targetAddr := srvConn.RemoteAddr().(*net.TCPAddr)
 
-	// Read the first few bytes to determine if it's HTTP
-	buffer := make([]byte, 1024)
-	n, err := clientConn.Read(buffer)
-	if err != nil && err != io.EOF {
-		fmt.Println("Error reading from client:", err)
-		err := clientConn.Close()
-		if err != nil {
-			// Maybe dont return? Otherwise server connection will stay online?
-			return
-		}
-
-		err = srvConn.Close()
-		if err != nil {
-			return
-		}
-		return
-	}
-
-	// Check if the data looks like an HTTP request
-	isHTTP := false
-	if n > 0 && (bytes.HasPrefix(buffer, []byte("GET")) || bytes.HasPrefix(buffer, []byte("POST"))) {
-		isHTTP = true
-	}
+	var hasModifiedBytes bool = false
 
 	// Is it even smart to only send the Real-IP header once on connection?
 
@@ -219,15 +259,10 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 			if headersEnd != -1 {
 				modifiedBuffer := append(buffer[:headersEnd], []byte("\r\n"+headers)...)
 				modifiedBuffer = append(modifiedBuffer, []byte("\r\n")...)
+				hasModifiedBytes = true
 				_, err := srvConn.Write(modifiedBuffer)
 				if err != nil {
 					fmt.Println("Error sending modified Header to server:", err)
-					return
-				}
-			} else {
-				_, err := srvConn.Write(buffer[:n])
-				if err != nil {
-					fmt.Println("Error sending unmodified content to server:", err)
 					return
 				}
 			}
@@ -238,15 +273,11 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 			if err != nil {
 				fmt.Println("Error writing proxy header:", err)
 			}
-			_, err = srvConn.Write(buffer[:n])
-			if err != nil {
-				fmt.Println("Error forwarding TCP packet to server:", err)
-				return
-			}
 		}
-	} else {
-		// Directly forward the buffer content
-		_, err := srvConn.Write(buffer[:n])
+	}
+
+	if !hasModifiedBytes {
+		_, err = srvConn.Write(buffer[:n])
 		if err != nil {
 			fmt.Println("Error forwarding TCP packet to server:", err)
 			return
@@ -266,4 +297,19 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 			fmt.Println("Error forwarding TCP response to client:", err)
 		}
 	}()
+}
+
+// Helper function to read VarInt from Minecraft protocol
+func readVarInt(data []byte) (int, int) {
+	var value int
+	bytesRead := 0
+	for bytesRead < len(data) {
+		byteValue := int(data[bytesRead])
+		value |= (byteValue & 0x7F) << (7 * bytesRead)
+		bytesRead++
+		if (byteValue & 0x80) == 0 {
+			break
+		}
+	}
+	return value, bytesRead
 }
