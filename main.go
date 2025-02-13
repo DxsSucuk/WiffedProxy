@@ -205,6 +205,8 @@ func handleTCPConnection(clientConn net.Conn, target string) {
 		isHTTP = true
 	}
 
+	// Is it even smart to only send the Real-IP header once on connection?
+
 	// Handle Proxy Protocol or X-Real-IP header
 	if !skipProxyHeader {
 		if isHTTP {
