@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 var udpTargetMap = make(map[string]string)
@@ -19,6 +20,7 @@ var skipProxyHeader bool
 var dontTLS bool
 var dontMinecraftHandshake bool
 var dontHTTPHost bool
+var logConnections bool
 var tcpRoutingHost int64
 
 func main() {
@@ -32,6 +34,7 @@ func main() {
 	flag.BoolVar(&dontTLS, "dont-tls", false, "Don't try to pass SNI from TLS request")
 	flag.BoolVar(&dontMinecraftHandshake, "dont-mc", false, "Don't try to pass Hostname from Minecraft Handshake")
 	flag.BoolVar(&dontHTTPHost, "dont-http", false, "Don't try to pass Hostname from HTTP request")
+	flag.BoolVar(&logConnections, "log-con", false, "Log each connection.")
 	flag.Parse()
 
 	// Parse the UDP and TCP entries
@@ -66,6 +69,10 @@ func main() {
 
 	if dontHTTPHost {
 		fmt.Println("Skipping HTTP Hostname extraction")
+	}
+
+	if logConnections {
+		fmt.Println("Log connections")
 	}
 
 	// Start proxies
@@ -127,6 +134,10 @@ func startUDPProxy(localAddr string) {
 }
 
 func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, target string) {
+	if logConnections {
+		fmt.Println("Received UDP packet from (C=>S):", clientAddr.IP.String())
+	}
+
 	targetAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		fmt.Println("Error resolving UDP target address:", err)
@@ -144,14 +155,11 @@ func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, ta
 	var packet []byte
 	if !skipProxyHeader {
 		proxyHeader := proxyproto.HeaderProxyFromAddrs(2, clientAddr, targetAddr)
-		var proxyHeaderContent []byte
 		proxyHeaderContent, err := proxyHeader.Format()
-
 		if err != nil {
 			fmt.Println("Proxy Protocol V2 UDP Format error:", err)
 			return
 		}
-
 		packet = append(proxyHeaderContent, data...)
 	} else {
 		packet = data
@@ -164,15 +172,25 @@ func handleUDPPacket(conn *net.UDPConn, data []byte, clientAddr *net.UDPAddr, ta
 	}
 
 	respBuffer := make([]byte, 4096)
-	n, _, err := srvConn.ReadFromUDP(respBuffer)
-	if err != nil {
-		fmt.Println("Error reading UDP response:", err)
-		return
-	}
+	for {
+		srvConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := srvConn.ReadFromUDP(respBuffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			}
+			//fmt.Println("Error reading UDP response:", err)
+			return
+		}
 
-	_, err = conn.WriteToUDP(respBuffer[:n], clientAddr)
-	if err != nil {
-		fmt.Println("Error sending UDP response to client:", err)
+		_, err = conn.WriteToUDP(respBuffer[:n], clientAddr)
+		if err != nil {
+			fmt.Println("Error sending UDP response to client:", err)
+			return
+		} else {
+			if logConnections {
+				fmt.Println("Received UDP response from (S=>C):", targetAddr.IP.String())
+			}
+		}
 	}
 }
 
@@ -212,6 +230,10 @@ func startTCPProxy(localAddr string, isRouting bool) {
 
 func handleTCPConnection(clientConn net.Conn, target string, isRouting bool) {
 	sourceAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+
+	if logConnections {
+		fmt.Println("Opened TCP connection from:", sourceAddr.IP.String())
+	}
 
 	// Read the first few bytes to determine if it's HTTP or Minecraft
 	buffer := make([]byte, 1024)
