@@ -233,10 +233,35 @@ func startTCPProxy(localAddr string, isRouting bool) {
 		}
 	}(listener)
 
+	var ops *ProxyOptions
+
 	if isRouting {
 		fmt.Println("TCP Proxy started on", localAddr, "set to routing")
 	} else {
-		fmt.Println("TCP Proxy started on", localAddr, "forwarding to", tcpTargetMap[localAddr])
+		tempOps := tcpTargetMap[localAddr]
+		ops = &tempOps
+
+		fmt.Println("TCP Proxy started on", localAddr, "forwarding to", ops.Target)
+
+		if ops.SkipProxyHeader {
+			fmt.Println("Skipping proxy header")
+		}
+
+		if ops.TLS {
+			fmt.Println("Using TLS SNI extraction")
+		}
+
+		if ops.MinecraftHandshake {
+			fmt.Println("Using Minecraft Handshake hostname extraction")
+		}
+
+		if ops.HTTPHost {
+			fmt.Println("Using HTTP Hostname extraction")
+		}
+
+		if ops.LogConnections {
+			fmt.Println("Log connections")
+		}
 	}
 
 	for {
@@ -247,31 +272,9 @@ func startTCPProxy(localAddr string, isRouting bool) {
 		}
 
 		if isRouting {
-			go handleTCPConnection(clientConn, nil, true)
+			go handleTCPConnection(clientConn, ops, true)
 		} else {
-			ops := tcpTargetMap[localAddr]
-
-			if ops.SkipProxyHeader {
-				fmt.Println("Skipping proxy header")
-			}
-
-			if ops.TLS {
-				fmt.Println("Using TLS SNI extraction")
-			}
-
-			if ops.MinecraftHandshake {
-				fmt.Println("Using Minecraft Handshake hostname extraction")
-			}
-
-			if ops.HTTPHost {
-				fmt.Println("Using HTTP Hostname extraction")
-			}
-
-			if ops.LogConnections {
-				fmt.Println("Log connections")
-			}
-
-			go handleTCPConnection(clientConn, &ops, false)
+			go handleTCPConnection(clientConn, ops, false)
 		}
 	}
 }
