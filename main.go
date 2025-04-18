@@ -124,7 +124,28 @@ func startUDPProxy(localAddr string) {
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP Proxy started on", localAddr, "forwarding to", udpTargetMap[localAddr])
+	ops := udpTargetMap[localAddr]
+
+	fmt.Println("UDP Proxy started on", localAddr, "forwarding to", ops.Target)
+	if ops.SkipProxyHeader {
+		fmt.Println("Skipping proxy header")
+	}
+
+	if ops.TLS {
+		fmt.Println("Using TLS SNI extraction")
+	}
+
+	if ops.MinecraftHandshake {
+		fmt.Println("Using Minecraft Handshake hostname extraction")
+	}
+
+	if ops.HTTPHost {
+		fmt.Println("Using HTTP Hostname extraction")
+	}
+
+	if ops.LogConnections {
+		fmt.Println("Log connections")
+	}
 
 	buffer := make([]byte, 4096)
 	for {
@@ -134,7 +155,7 @@ func startUDPProxy(localAddr string) {
 			continue
 		}
 
-		go handleUDPPacket(conn, buffer[:n], clientAddr, udpTargetMap[localAddr])
+		go handleUDPPacket(conn, buffer[:n], clientAddr, ops)
 	}
 }
 
@@ -229,6 +250,27 @@ func startTCPProxy(localAddr string, isRouting bool) {
 			go handleTCPConnection(clientConn, nil, true)
 		} else {
 			ops := tcpTargetMap[localAddr]
+
+			if ops.SkipProxyHeader {
+				fmt.Println("Skipping proxy header")
+			}
+
+			if ops.TLS {
+				fmt.Println("Using TLS SNI extraction")
+			}
+
+			if ops.MinecraftHandshake {
+				fmt.Println("Using Minecraft Handshake hostname extraction")
+			}
+
+			if ops.HTTPHost {
+				fmt.Println("Using HTTP Hostname extraction")
+			}
+
+			if ops.LogConnections {
+				fmt.Println("Log connections")
+			}
+
 			go handleTCPConnection(clientConn, &ops, false)
 		}
 	}
