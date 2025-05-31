@@ -69,27 +69,29 @@ func main() {
 
 	cfg, err := loadConfig("config.yml")
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 	}
 
-	if len(cfg.UDPEntries) > 0 {
-		for index := range cfg.UDPEntries {
-			var udpConfigEntry = cfg.UDPEntries[index]
-			udpTargetMap[udpConfigEntry.BindAddress] = udpConfigEntry.Options
+	if cfg != nil {
+		if len(cfg.UDPEntries) > 0 {
+			for index := range cfg.UDPEntries {
+				var udpConfigEntry = cfg.UDPEntries[index]
+				udpTargetMap[udpConfigEntry.BindAddress] = udpConfigEntry.Options
+			}
 		}
-	}
 
-	if len(cfg.TCPEntries) > 0 {
-		for index := range cfg.TCPEntries {
-			var tcpConfigEntry = cfg.TCPEntries[index]
-			tcpTargetMap[tcpConfigEntry.BindAddress] = tcpConfigEntry.Options
+		if len(cfg.TCPEntries) > 0 {
+			for index := range cfg.TCPEntries {
+				var tcpConfigEntry = cfg.TCPEntries[index]
+				tcpTargetMap[tcpConfigEntry.BindAddress] = tcpConfigEntry.Options
+			}
 		}
-	}
 
-	if len(cfg.TCPRoutingEntries) > 0 {
-		for index := range cfg.TCPRoutingEntries {
-			var tcpRoutingConfigEntry = cfg.TCPRoutingEntries[index]
-			tcpRoutingMap[tcpRoutingConfigEntry.BindAddress] = tcpRoutingConfigEntry.Options
+		if len(cfg.TCPRoutingEntries) > 0 {
+			for index := range cfg.TCPRoutingEntries {
+				var tcpRoutingConfigEntry = cfg.TCPRoutingEntries[index]
+				tcpRoutingMap[tcpRoutingConfigEntry.BindAddress] = tcpRoutingConfigEntry.Options
+			}
 		}
 	}
 
@@ -110,7 +112,7 @@ func main() {
 
 	if tcpRoutingHost > 0 {
 		routingPort = tcpRoutingHost
-	} else if cfg.TCPRoutingHost > 0 {
+	} else if cfg != nil && cfg.TCPRoutingHost > 0 {
 		routingPort = cfg.TCPRoutingHost
 	} else {
 		routingPort = 0
