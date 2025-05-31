@@ -1,0 +1,28 @@
+udpEntries:
+  - bindAddress: "127.0.0.1:19132"
+    options:
+      target: "127.0.0.1:1000"
+      skip_proxy_header: true
+      tls: false
+      minecraft_handshake: false
+      http_host: false
+      log_connections: false
+tcpEntries:
+  - bindAddress: "127.0.0.1:19133"
+    options:
+      target: "127.0.0.1:1001"
+      skip_proxy_header: true
+      tls: false
+      minecraft_handshake: false
+      http_host: false
+      log_connections: false
+tcpRoutingEntries:
+  - hostname: "mc.example.net"
+    options:
+      target: "127.0.0.1:1001"
+      skip_proxy_header: true
+      tls: false
+      minecraft_handshake: false
+      http_host: false
+      log_connections: false
+tcpRoutingHost: 6969

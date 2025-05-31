@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	proxyproto "github.com/pires/go-proxyproto"
+	"github.com/pires/go-proxyproto"
+	"gopkg.in/yaml.v2"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -18,13 +20,30 @@ var tcpTargetMap = make(map[string]ProxyOptions)
 var tcpRoutingMap = make(map[string]ProxyOptions)
 var tcpRoutingHost int64
 
+type Config struct {
+	UDPEntries        []ProxyTarget   `yaml:"udpEntries"`
+	TCPEntries        []ProxyTarget   `yaml:"tcpEntries"`
+	TCPRoutingEntries []RoutingTarget `yaml:"tcpRoutingEntries"`
+	TCPRoutingHost    int64           `yaml:"tcpRoutingHost"`
+}
+
+type ProxyTarget struct {
+	BindAddress string       `yaml:"bindAddress"`
+	Options     ProxyOptions `yaml:"options"`
+}
+
+type RoutingTarget struct {
+	BindAddress string       `yaml:"hostname"`
+	Options     ProxyOptions `yaml:"options"`
+}
+
 type ProxyOptions struct {
-	Target             string
-	SkipProxyHeader    bool
-	TLS                bool
-	MinecraftHandshake bool
-	HTTPHost           bool
-	LogConnections     bool
+	Target             string `yaml:"target"`
+	SkipProxyHeader    bool   `yaml:"skip_proxy_header"`
+	TLS                bool   `yaml:"tls"`
+	MinecraftHandshake bool   `yaml:"minecraft_handshake"`
+	HTTPHost           bool   `yaml:"http_host"`
+	LogConnections     bool   `yaml:"log_connections"`
 }
 
 func main() {
@@ -48,6 +67,32 @@ func main() {
 		tcpRoutingMap = parseEntries(*tcpRoutingEntries)
 	}
 
+	cfg, err := loadConfig("config.yml")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(cfg.UDPEntries) > 0 {
+		for index := range cfg.UDPEntries {
+			var udpConfigEntry = cfg.UDPEntries[index]
+			udpTargetMap[udpConfigEntry.BindAddress] = udpConfigEntry.Options
+		}
+	}
+
+	if len(cfg.TCPEntries) > 0 {
+		for index := range cfg.TCPEntries {
+			var tcpConfigEntry = cfg.TCPEntries[index]
+			tcpTargetMap[tcpConfigEntry.BindAddress] = tcpConfigEntry.Options
+		}
+	}
+
+	if len(cfg.TCPRoutingEntries) > 0 {
+		for index := range cfg.TCPRoutingEntries {
+			var tcpRoutingConfigEntry = cfg.TCPRoutingEntries[index]
+			tcpRoutingMap[tcpRoutingConfigEntry.BindAddress] = tcpRoutingConfigEntry.Options
+		}
+	}
+
 	// Check if no entries were provided and print a message
 	if len(udpTargetMap) == 0 && len(tcpTargetMap) == 0 && len(tcpRoutingMap) == 0 {
 		fmt.Println("No entries provided for proxying. Please provide UDP and/or TCP address mappings.")
@@ -61,11 +106,35 @@ func main() {
 		go startTCPProxy(localAddr, false)
 	}
 
+	var routingPort int64
+
 	if tcpRoutingHost > 0 {
-		go startTCPProxy(fmt.Sprintf(":%d", tcpRoutingHost), true)
+		routingPort = tcpRoutingHost
+	} else if cfg.TCPRoutingHost > 0 {
+		routingPort = cfg.TCPRoutingHost
+	} else {
+		routingPort = 0
+	}
+
+	if routingPort > 0 {
+		go startTCPProxy(fmt.Sprintf(":%d", routingPort), true)
 	}
 
 	select {} // Keep main alive
+}
+
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	return &cfg, nil
 }
 
 // Parse command-line entry string (e.g., ":9000=127.0.0.1:8080|no-proxy-header,mc,log-con,:9001=127.0.0.1:8081|no-proxy-header,log-con")

@@ -1,5 +1,10 @@
 module WiffedProxy
 
-go 1.23
+go 1.24
 
-require github.com/pires/go-proxyproto v0.8.0 // indirect
+toolchain go1.24.3
+
+require (
+	github.com/pires/go-proxyproto v0.8.1
+	gopkg.in/yaml.v2 v2.4.0
+)
